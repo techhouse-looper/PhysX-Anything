@@ -232,6 +232,7 @@ if __name__ == '__main__':
     parser.add_argument("--max_length", type=int, default=32768)
     parser.add_argument("--max_new_tokens", type=int, default=None)
     parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument("--basic_only", type=str2bool, nargs="?", const=True, default=False)
     args = parser.parse_args()
 
     basepath=args.demo_path
@@ -301,6 +302,9 @@ if __name__ == '__main__':
         while 'l_'+str(index) in basicoutput:
             index+=1
 
+        if args.basic_only:
+            continue
+
         allcoord=[]
         for part in range(index):
 
@@ -324,4 +328,7 @@ if __name__ == '__main__':
                 partply=trimesh.points.PointCloud(voxels_back)
                 partply.export(os.path.join(save_dir,'ind_'+str(part)+'.ply'))
 
-        np.save(os.path.join(save_dir,'allind.npy'),np.concatenate(allcoord))
+        if allcoord:
+            np.save(os.path.join(save_dir,'allind.npy'),np.concatenate(allcoord))
+        else:
+            print(f"[warn] no part coordinates generated for {name}; allind.npy was not written")
