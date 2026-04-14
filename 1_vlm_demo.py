@@ -9,6 +9,83 @@ from PIL import Image
 import trimesh
 from rembg import remove
 import argparse
+
+
+def str2bool(value):
+    if isinstance(value, bool):
+        return value
+    value = value.lower()
+    if value in {"yes", "true", "t", "1", "y"}:
+        return True
+    if value in {"no", "false", "f", "0", "n"}:
+        return False
+    raise argparse.ArgumentTypeError("Boolean value expected.")
+
+
+def torch_dtype_from_name(name):
+    if name == "bfloat16":
+        return torch.bfloat16
+    if name == "float16":
+        return torch.float16
+    if name == "float32":
+        return torch.float32
+    raise ValueError(f"Unsupported dtype: {name}")
+
+
+def build_quantization_config(args):
+    if args.quantization == "none":
+        return None
+
+    from transformers import BitsAndBytesConfig
+
+    if args.quantization == "4bit":
+        return BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type=args.bnb_4bit_quant_type,
+            bnb_4bit_compute_dtype=torch_dtype_from_name(args.bnb_4bit_compute_dtype),
+            bnb_4bit_use_double_quant=args.bnb_4bit_use_double_quant,
+        )
+
+    if args.quantization == "8bit":
+        return BitsAndBytesConfig(load_in_8bit=True)
+
+    raise ValueError(f"Unsupported quantization mode: {args.quantization}")
+
+
+def load_vlm_model(args):
+    dtype = torch_dtype_from_name(args.torch_dtype)
+    quantization_config = build_quantization_config(args)
+    attn_candidates = (
+        ["flash_attention_2", "sdpa"]
+        if args.attn_implementation == "auto"
+        else [args.attn_implementation]
+    )
+
+    last_error = None
+    for attn_implementation in attn_candidates:
+        kwargs = {
+            "torch_dtype": dtype,
+            "device_map": args.device_map,
+        }
+        if attn_implementation != "none":
+            kwargs["attn_implementation"] = attn_implementation
+        if quantization_config is not None:
+            kwargs["quantization_config"] = quantization_config
+
+        try:
+            print(
+                f"[load] ckpt={args.ckpt} quantization={args.quantization} "
+                f"dtype={args.torch_dtype} attn={attn_implementation} device_map={args.device_map}"
+            )
+            return Qwen2_5_VLForConditionalGeneration.from_pretrained(args.ckpt, **kwargs)
+        except Exception as exc:
+            last_error = exc
+            if args.attn_implementation == "auto" and attn_implementation == "flash_attention_2":
+                print(f"[warn] flash_attention_2 load failed; falling back to sdpa: {exc}")
+                continue
+            raise
+
+    raise RuntimeError("Failed to load VLM model") from last_error
 def voxel_encode(voxels: np.ndarray, size: int = 32) -> np.ndarray:
 
     voxels = np.asarray(voxels, dtype=np.int64)
@@ -97,7 +174,7 @@ def addmessage(message,before,after):
 
 
 
-def generate_save(model,messages,save_dir,save_name='test',save=True):
+def generate_save(model,messages,save_dir,save_name='test',save=True,max_length=32768,max_new_tokens=None):
 
 
     text = processor.apply_chat_template(
@@ -114,7 +191,16 @@ def generate_save(model,messages,save_dir,save_name='test',save=True):
     inputs = inputs.to(model.device)
 
 
-    generated_ids = model.generate(**inputs, do_sample=False,temperature=0,max_length=32768)
+    generation_kwargs = {
+        "do_sample": False,
+        "temperature": 0,
+    }
+    if max_new_tokens is not None:
+        generation_kwargs["max_new_tokens"] = max_new_tokens
+    else:
+        generation_kwargs["max_length"] = max_length
+
+    generated_ids = model.generate(**inputs, **generation_kwargs)
     generated_ids_trimmed = [
         out_ids[len(in_ids) :] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
     ]
@@ -130,24 +216,37 @@ def generate_save(model,messages,save_dir,save_name='test',save=True):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument("--demo_path", type=str, default='./demo')
-    parser.add_argument("--save_part_ply", type=bool, default=True)
-    parser.add_argument("--remove_bg", type=bool, default=False)
+    parser.add_argument("--output_path", type=str, default='./test_demo')
+    parser.add_argument("--save_part_ply", type=str2bool, nargs="?", const=True, default=True)
+    parser.add_argument("--remove_bg", type=str2bool, nargs="?", const=True, default=False)
     parser.add_argument("--ckpt", type=str, default='./pretrain/vlm')
+    parser.add_argument("--quantization", choices=["none", "4bit", "8bit"], default="none")
+    parser.add_argument("--torch_dtype", choices=["bfloat16", "float16", "float32"], default="bfloat16")
+    parser.add_argument("--bnb_4bit_compute_dtype", choices=["bfloat16", "float16", "float32"], default="bfloat16")
+    parser.add_argument("--bnb_4bit_quant_type", choices=["nf4", "fp4"], default="nf4")
+    parser.add_argument("--bnb_4bit_use_double_quant", type=str2bool, nargs="?", const=True, default=True)
+    parser.add_argument("--device_map", type=str, default="auto")
+    parser.add_argument("--attn_implementation", choices=["auto", "flash_attention_2", "sdpa", "eager", "none"], default="auto")
+    parser.add_argument("--min_pixels", type=int, default=65536)
+    parser.add_argument("--max_pixels", type=int, default=262144)
+    parser.add_argument("--max_length", type=int, default=32768)
+    parser.add_argument("--max_new_tokens", type=int, default=None)
+    parser.add_argument("--limit", type=int, default=None)
     args = parser.parse_args()
 
     basepath=args.demo_path
-    namelist=os.listdir(basepath)
+    namelist=sorted(
+        name for name in os.listdir(basepath)
+        if name.lower().endswith((".png", ".jpg", ".jpeg", ".webp", ".bmp"))
+    )
+    if args.limit is not None:
+        namelist = namelist[:args.limit]
     
 
 
-    model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-                args.ckpt,
-                torch_dtype=torch.bfloat16,
-                attn_implementation="flash_attention_2",
-                device_map="auto",
-            )
-    min_pixels = 65536
-    max_pixels = 262144
+    model = load_vlm_model(args)
+    min_pixels = args.min_pixels
+    max_pixels = args.max_pixels
 
     processor = AutoProcessor.from_pretrained("Qwen/Qwen2.5-VL-7B-Instruct", min_pixels=min_pixels, max_pixels=max_pixels)
     processor.image_processor.min_pixels=min_pixels
@@ -159,7 +258,7 @@ if __name__ == '__main__':
 
 
 
-        save_dir=os.path.join('test_demo',name[:-4])
+        save_dir=os.path.join(args.output_path, os.path.splitext(name)[0])
         os.makedirs(os.path.join(save_dir), exist_ok=True)
 
         image_path = os.path.join(basepath,name)
@@ -190,7 +289,14 @@ if __name__ == '__main__':
         
     
 
-        basicoutput=generate_save(model,messages,save_dir,'basic_info')
+        basicoutput=generate_save(
+            model,
+            messages,
+            save_dir,
+            'basic_info',
+            max_length=args.max_length,
+            max_new_tokens=args.max_new_tokens,
+        )
         index=0
         while 'l_'+str(index) in basicoutput:
             index+=1
@@ -200,7 +306,15 @@ if __name__ == '__main__':
 
             question="Based on the structured description of l_"+str(part)+", generate its 3D voxel grid in the following format (voxel grid=32, use numbers from 0 to 32767, merge maximal consecutive runs: 199...216 -> 199-216): 184 198 199-216 230-237..."
             messages1=addmessage(messages,basicoutput,question)
-            output1=generate_save(model,messages1,save_dir,'coord_'+str(part),save=True)
+            output1=generate_save(
+                model,
+                messages1,
+                save_dir,
+                'coord_'+str(part),
+                save=True,
+                max_length=args.max_length,
+                max_new_tokens=args.max_new_tokens,
+            )
             print(len(messages1))
             idx_back = dash_str_to_ints(output1)
             voxels_back = voxel_decode(idx_back)
@@ -211,4 +325,3 @@ if __name__ == '__main__':
                 partply.export(os.path.join(save_dir,'ind_'+str(part)+'.ply'))
 
         np.save(os.path.join(save_dir,'allind.npy'),np.concatenate(allcoord))
-
