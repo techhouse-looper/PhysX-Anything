@@ -19,6 +19,15 @@ QUANT_CONFIG_ALIASES = {
     "quant_type": "bnb_4bit_quant_type",
     "use_double_quant": "bnb_4bit_use_double_quant",
 }
+QUANT_CONFIG_VALUE_CHOICES = {
+    "quantization": {"none", "4bit", "8bit"},
+    "torch_dtype": {"bfloat16", "float16", "float32"},
+    "attn_implementation": {"auto", "flash_attention_2", "sdpa", "eager", "none"},
+    "bnb_4bit_compute_dtype": {"bfloat16", "float16", "float32"},
+    "bnb_4bit_quant_type": {"nf4", "fp4"},
+}
+QUANT_CONFIG_BOOL_KEYS = {"bnb_4bit_use_double_quant"}
+QUANT_CONFIG_STRING_KEYS = {"device_map"}
 
 
 def str2bool(value):
@@ -30,6 +39,29 @@ def str2bool(value):
     if value in {"no", "false", "f", "0", "n"}:
         return False
     raise argparse.ArgumentTypeError("Boolean value expected.")
+
+
+def validate_quant_config_value(key, value):
+    if key in QUANT_CONFIG_BOOL_KEYS:
+        return str2bool(value) if isinstance(value, str) else bool(value)
+
+    if key in QUANT_CONFIG_STRING_KEYS:
+        if not isinstance(value, str) or not value:
+            raise ValueError(f"quantization config key {key} must be a non-empty string")
+        return value
+
+    if key in QUANT_CONFIG_VALUE_CHOICES:
+        value = str(value)
+        choices = QUANT_CONFIG_VALUE_CHOICES[key]
+        if value not in choices:
+            choices_text = ", ".join(sorted(choices))
+            raise ValueError(
+                f"invalid value for quantization config key {key}: {value}; "
+                f"expected one of: {choices_text}"
+            )
+        return value
+
+    raise ValueError(f"unsupported quantization config key: {key}")
 
 
 def load_quant_config_defaults(path):
@@ -55,7 +87,8 @@ def load_quant_config_defaults(path):
         for key, value in values.items():
             if key not in QUANT_CONFIG_SECTIONS[section]:
                 raise ValueError(f"unknown quantization config key: {section}.{key}")
-            defaults[QUANT_CONFIG_ALIASES.get(key, key)] = value
+            normalized_key = QUANT_CONFIG_ALIASES.get(key, key)
+            defaults[normalized_key] = validate_quant_config_value(normalized_key, value)
     return defaults
 
 
@@ -219,6 +252,18 @@ def addmessage(message,before,after):
 
 
 
+def remove_stale_coordinate_artifacts(save_dir):
+    for file_name in os.listdir(save_dir):
+        is_coord_text = file_name.startswith("coord_") and file_name.endswith(".txt")
+        is_part_array = file_name.startswith("ind_") and file_name.endswith(".npy")
+        is_part_ply = file_name.startswith("ind_") and file_name.endswith(".ply")
+        is_all_parts = file_name == "allind.npy"
+        if is_coord_text or is_part_array or is_part_ply or is_all_parts:
+            path = os.path.join(save_dir, file_name)
+            if os.path.isfile(path):
+                os.remove(path)
+
+
 def generate_save(model,messages,save_dir,save_name='test',save=True,max_length=32768,max_new_tokens=None):
 
 
@@ -353,6 +398,7 @@ if __name__ == '__main__':
             index+=1
 
         if args.basic_only:
+            remove_stale_coordinate_artifacts(save_dir)
             continue
 
         allcoord=[]
