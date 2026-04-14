@@ -63,7 +63,13 @@ def run_control_low_vram(pipeline, pointinput, image, seed=1, formats=('mesh', '
 
 
 def voxel_grid_from_coords(coords, size=32, resolution=64):
-    coords = coords + 32 - (size) // 2
+    offset = (resolution - size) // 2
+    coords = coords + offset
+    if (coords < 0).any() or (coords >= resolution).any():
+        raise ValueError(
+            f"voxel coordinates exceed decoder grid bounds after offset; "
+            f"size={size}, resolution={resolution}, min={coords.min(axis=0)}, max={coords.max(axis=0)}"
+        )
     ss = torch.zeros(1, resolution, resolution, resolution, dtype=torch.long)
     ss[:, coords[:, 0], coords[:, 1], coords[:, 2]] = 1
     return ss.cuda().float().unsqueeze(0)
