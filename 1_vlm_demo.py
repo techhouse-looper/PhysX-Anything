@@ -3,7 +3,6 @@ from qwen_vl_utils import process_vision_info
 import torch
 import base64
 import os
-import ipdb
 import numpy as np
 from PIL import Image
 import trimesh
