@@ -1,0 +1,6 @@
+.omx/
+pretrain/
+test_demo/
+__pycache__/
+*.py[cod]
+*.log
