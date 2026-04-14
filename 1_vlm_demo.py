@@ -10,6 +10,17 @@ from rembg import remove
 import argparse
 
 
+QUANT_CONFIG_SECTIONS = {
+    "model": {"quantization", "torch_dtype", "device_map", "attn_implementation"},
+    "bnb_4bit": {"compute_dtype", "quant_type", "use_double_quant"},
+}
+QUANT_CONFIG_ALIASES = {
+    "compute_dtype": "bnb_4bit_compute_dtype",
+    "quant_type": "bnb_4bit_quant_type",
+    "use_double_quant": "bnb_4bit_use_double_quant",
+}
+
+
 def str2bool(value):
     if isinstance(value, bool):
         return value
@@ -19,6 +30,33 @@ def str2bool(value):
     if value in {"no", "false", "f", "0", "n"}:
         return False
     raise argparse.ArgumentTypeError("Boolean value expected.")
+
+
+def load_quant_config_defaults(path):
+    if not path:
+        return {}
+
+    import yaml
+
+    with open(path, "r", encoding="utf-8") as file:
+        data = yaml.safe_load(file) or {}
+    if not isinstance(data, dict):
+        raise ValueError("quantization config must be a YAML mapping")
+
+    defaults = {}
+    for section, values in data.items():
+        if section not in QUANT_CONFIG_SECTIONS:
+            raise ValueError(
+                f"unknown quantization config section: {section}; "
+                "allowed sections are model and bnb_4bit"
+            )
+        if not isinstance(values, dict):
+            raise ValueError(f"quantization config section must be a mapping: {section}")
+        for key, value in values.items():
+            if key not in QUANT_CONFIG_SECTIONS[section]:
+                raise ValueError(f"unknown quantization config key: {section}.{key}")
+            defaults[QUANT_CONFIG_ALIASES.get(key, key)] = value
+    return defaults
 
 
 def torch_dtype_from_name(name):
@@ -221,19 +259,24 @@ def generate_save(model,messages,save_dir,save_name='test',save=True,max_length=
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
+    pre_parser = argparse.ArgumentParser(add_help=False)
+    pre_parser.add_argument("--quant_config", type=str, default=None)
+    pre_args, _ = pre_parser.parse_known_args()
+    quant_defaults = load_quant_config_defaults(pre_args.quant_config)
+
+    parser = argparse.ArgumentParser(parents=[pre_parser])
     parser.add_argument("--demo_path", type=str, default='./demo')
     parser.add_argument("--output_path", type=str, default='./test_demo')
     parser.add_argument("--save_part_ply", type=str2bool, nargs="?", const=True, default=True)
     parser.add_argument("--remove_bg", type=str2bool, nargs="?", const=True, default=False)
     parser.add_argument("--ckpt", type=str, default='./pretrain/vlm')
-    parser.add_argument("--quantization", choices=["none", "4bit", "8bit"], default="none")
-    parser.add_argument("--torch_dtype", choices=["bfloat16", "float16", "float32"], default="bfloat16")
-    parser.add_argument("--bnb_4bit_compute_dtype", choices=["bfloat16", "float16", "float32"], default="bfloat16")
-    parser.add_argument("--bnb_4bit_quant_type", choices=["nf4", "fp4"], default="nf4")
-    parser.add_argument("--bnb_4bit_use_double_quant", type=str2bool, nargs="?", const=True, default=True)
-    parser.add_argument("--device_map", type=str, default="auto")
-    parser.add_argument("--attn_implementation", choices=["auto", "flash_attention_2", "sdpa", "eager", "none"], default="auto")
+    parser.add_argument("--quantization", choices=["none", "4bit", "8bit"], default=quant_defaults.get("quantization", "none"))
+    parser.add_argument("--torch_dtype", choices=["bfloat16", "float16", "float32"], default=quant_defaults.get("torch_dtype", "bfloat16"))
+    parser.add_argument("--bnb_4bit_compute_dtype", choices=["bfloat16", "float16", "float32"], default=quant_defaults.get("bnb_4bit_compute_dtype", "bfloat16"))
+    parser.add_argument("--bnb_4bit_quant_type", choices=["nf4", "fp4"], default=quant_defaults.get("bnb_4bit_quant_type", "nf4"))
+    parser.add_argument("--bnb_4bit_use_double_quant", type=str2bool, nargs="?", const=True, default=quant_defaults.get("bnb_4bit_use_double_quant", True))
+    parser.add_argument("--device_map", type=str, default=quant_defaults.get("device_map", "auto"))
+    parser.add_argument("--attn_implementation", choices=["auto", "flash_attention_2", "sdpa", "eager", "none"], default=quant_defaults.get("attn_implementation", "auto"))
     parser.add_argument("--min_pixels", type=int, default=65536)
     parser.add_argument("--max_pixels", type=int, default=262144)
     parser.add_argument("--max_length", type=int, default=32768)

@@ -1,0 +1,12 @@
+# Quantization/model-loading preset only.
+# Keep runtime parameters (demo path, output path, token caps, limits) on CLI.
+model:
+  quantization: 4bit
+  torch_dtype: bfloat16
+  device_map: auto
+  attn_implementation: sdpa
+
+bnb_4bit:
+  compute_dtype: bfloat16
+  quant_type: nf4
+  use_double_quant: true
