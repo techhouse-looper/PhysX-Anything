@@ -150,11 +150,19 @@ def dash_str_to_ints(s: str) -> np.ndarray:
     out = []
     for token in s.split():
         if "-" in token:
-            a, b = map(int, token.split("-"))
+            parts = token.split("-")
+            if len(parts) != 2 or not parts[0].isdigit() or not parts[1].isdigit():
+                print(f"[warn] skip malformed voxel range token: {token}")
+                continue
+            a, b = map(int, parts)
             if a > b:
-                a, b = b, a 
+                print(f"[warn] skip descending voxel range token: {token}")
+                continue
             out.extend(range(a, b + 1))
         else:
+            if not token.isdigit():
+                print(f"[warn] skip malformed voxel token: {token}")
+                continue
             out.append(int(token))
     return np.array(sorted(set(out)), dtype=np.int64)
 
