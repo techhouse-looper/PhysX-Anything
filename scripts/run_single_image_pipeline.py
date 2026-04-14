@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import hashlib
 import os
 import shutil
 import subprocess
@@ -7,7 +8,8 @@ from pathlib import Path
 
 VLM_ENV = "physx-anything"
 DECODER_ENV = "physx-decoder"
-RUN_ROOT = Path("pipeline_runs")
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+RUN_ROOT = PROJECT_ROOT / "pipeline_runs"
 MAX_NEW_TOKENS = "16384"
 
 
@@ -15,10 +17,16 @@ def safe_stem(path: Path) -> str:
     return "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in path.stem) or "image"
 
 
+def run_key(path: Path) -> str:
+    digest = hashlib.sha1(str(path).encode("utf-8")).hexdigest()[:8]
+    suffix = path.suffix.lower().lstrip(".") or "file"
+    return f"{safe_stem(path)}_{suffix}_{digest}"
+
+
 def run_step(name: str, command: list[str], env: dict[str, str] | None = None) -> None:
     print(f"\n=== {name} ===")
     print(" ".join(command))
-    subprocess.run(command, check=True, env=env)
+    subprocess.run(command, check=True, env=env, cwd=PROJECT_ROOT)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -35,7 +43,7 @@ def main() -> None:
     if not image_path.is_file():
         raise FileNotFoundError(f"image_path does not exist: {image_path}")
 
-    run_name = safe_stem(image_path)
+    run_name = run_key(image_path)
     run_dir = RUN_ROOT / run_name
     demo_dir = run_dir / "demo"
     output_dir = run_dir / "test_demo"
@@ -46,7 +54,7 @@ def main() -> None:
     shutil.copy2(image_path, staged_image)
 
     env = os.environ.copy()
-    env["PYTHONPATH"] = "."
+    env["PYTHONPATH"] = str(PROJECT_ROOT)
 
     run_step(
         "1_vlm_demo",
