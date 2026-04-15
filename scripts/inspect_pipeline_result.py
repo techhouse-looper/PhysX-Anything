@@ -9,6 +9,7 @@ import numpy as np
 
 REQUIRED_FILES = ["basic_info.txt", "basic_info.json", "sample.glb", "basic.urdf", "basic.xml"]
 COORD_TOKEN_RE = re.compile(r"^\d+(?:-\d+)?$")
+MAX_VOXEL_INDEX = 32 ** 3 - 1
 
 
 def rel(path: Path, root: Path) -> str:
@@ -97,6 +98,7 @@ def check_coord_text(result_dir: Path, report: dict[str, Any]) -> None:
         tokens = text.split()
         malformed = []
         descending = []
+        out_of_range = []
         for token in tokens:
             if not COORD_TOKEN_RE.match(token):
                 malformed.append(token)
@@ -105,12 +107,21 @@ def check_coord_text(result_dir: Path, report: dict[str, Any]) -> None:
                 a, b = map(int, token.split("-"))
                 if a > b:
                     descending.append(token)
+                    continue
+                if a < 0 or b > MAX_VOXEL_INDEX:
+                    out_of_range.append(token)
+            else:
+                value = int(token)
+                if value < 0 or value > MAX_VOXEL_INDEX:
+                    out_of_range.append(token)
         item = {"file": path.name, "bytes": path.stat().st_size, "tokens": len(tokens)}
         report["coord_text"].append(item)
         if malformed:
             add_warning(report, f"{path.name} has malformed coordinate tokens: {malformed[:5]}")
         if descending:
             add_warning(report, f"{path.name} has descending coordinate ranges: {descending[:5]}")
+        if out_of_range:
+            add_warning(report, f"{path.name} has out-of-range voxel tokens: {out_of_range[:5]}")
         if path.stat().st_size < 50:
             add_warning(report, f"{path.name} is very small; part may be under-generated")
 
@@ -139,7 +150,11 @@ def check_voxel_arrays(result_dir: Path, report: dict[str, Any]) -> None:
 
     allind = result_dir / "allind.npy"
     if allind.exists():
-        arr = np.load(allind)
+        try:
+            arr = np.load(allind)
+        except Exception as exc:
+            add_error(report, f"failed to load allind.npy: {exc}")
+            return
         report["allind"] = {"shape": list(arr.shape), "voxels": int(arr.shape[0]) if arr.ndim else 0}
         if arr.ndim != 2 or arr.shape[1] != 3:
             add_error(report, f"allind.npy has invalid shape: {arr.shape}")
