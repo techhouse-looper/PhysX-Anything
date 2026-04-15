@@ -28,12 +28,14 @@ def read_text(path: Path, limit: int = 6000) -> str:
 
 
 def find_input_images(result_dir: Path) -> list[Path]:
-    # Expected wrapper layout: pipeline_runs/<run>/test_demo/<object>.
-    run_root = result_dir.parents[1] if len(result_dir.parents) >= 2 else result_dir.parent
-    demo_dir = run_root / "demo"
-    if not demo_dir.exists():
-        return []
-    return sorted(path for path in demo_dir.iterdir() if path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".bmp"})
+    # Wrapper layout: pipeline_runs/<run>/test_demo/<object> with sibling demo/.
+    if len(result_dir.parents) >= 2 and result_dir.parent.name == "test_demo":
+        run_root = result_dir.parents[1]
+        if run_root.parent.name == "pipeline_runs":
+            demo_dir = run_root / "demo"
+            if demo_dir.exists():
+                return sorted(path for path in demo_dir.iterdir() if path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".bmp"})
+    return []
 
 
 def rel_link(path: Path, base: Path) -> str:
@@ -47,7 +49,14 @@ def load_summary(result_dir: Path) -> dict:
     path = result_dir / "inspection_summary.json"
     if not path.exists():
         return {"status": "MISSING_INSPECTION", "warnings": ["inspection_summary.json not found"], "errors": []}
-    return json.loads(path.read_text())
+    try:
+        return json.loads(path.read_text())
+    except Exception as exc:
+        return {
+            "status": "INVALID_INSPECTION",
+            "warnings": [],
+            "errors": [f"inspection_summary.json could not be parsed: {exc}"],
+        }
 
 
 def artifact_list(result_dir: Path) -> str:
