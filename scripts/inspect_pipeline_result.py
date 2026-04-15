@@ -10,6 +10,8 @@ import numpy as np
 REQUIRED_FILES = ["basic_info.txt", "basic_info.json", "sample.glb", "basic.urdf", "basic.xml"]
 COORD_TOKEN_RE = re.compile(r"^\d+(?:-\d+)?$")
 MAX_VOXEL_INDEX = 32 ** 3 - 1
+HANDLE_KEYWORDS = ("grip", "loop")
+REPEATED_PART_RATIO_WARN = 3.0
 
 
 def rel(path: Path, root: Path) -> str:
@@ -188,6 +190,124 @@ def check_obj_parts(result_dir: Path, report: dict[str, Any]) -> None:
         add_error(report, "objs/ exists but no part OBJ files were found")
 
 
+def part_name_by_label(basic_info: dict[str, Any] | None) -> dict[str, str]:
+    if not basic_info:
+        return {}
+    mapping = {}
+    for part in basic_info.get("parts", []):
+        if isinstance(part, dict) and "label" in part:
+            mapping[str(part.get("label"))] = str(part.get("name", ""))
+    return mapping
+
+
+def mesh_projected_holes(mesh, axes: tuple[int, int], resolution: int = 160) -> int:
+    from scipy import ndimage
+    from skimage.draw import polygon
+
+    vertices = np.asarray(mesh.vertices)
+    faces = np.asarray(mesh.faces)
+    if vertices.size == 0 or faces.size == 0:
+        return 0
+
+    pts = vertices[:, axes]
+    mins = pts.min(axis=0)
+    spans = pts.max(axis=0) - mins
+    if (spans <= 1e-8).any():
+        return 0
+    scaled = (pts - mins) / spans * (resolution - 1)
+    mask = np.zeros((resolution, resolution), dtype=bool)
+
+    for face in faces:
+        tri = scaled[face]
+        rr, cc = polygon(tri[:, 1], tri[:, 0], shape=mask.shape)
+        mask[rr, cc] = True
+
+    if mask.sum() == 0:
+        return 0
+    filled = ndimage.binary_fill_holes(mask)
+    holes = filled & ~mask
+    labels, count = ndimage.label(holes)
+    min_area = max(20, int(mask.sum() * 0.002))
+    significant = 0
+    for idx in range(1, count + 1):
+        if int((labels == idx).sum()) >= min_area:
+            significant += 1
+    return significant
+
+
+def check_part_topology(result_dir: Path, report: dict[str, Any], basic_info: dict[str, Any] | None) -> None:
+    try:
+        import trimesh
+    except Exception as exc:
+        add_warning(report, f"trimesh unavailable; part topology checks skipped: {exc}")
+        return
+
+    labels_to_names = part_name_by_label(basic_info)
+    repeated: dict[str, list[dict[str, Any]]] = {}
+    projected_holes_available = True
+
+    for obj in sorted((result_dir / "objs").glob("*/*.obj")):
+        label = obj.parent.name
+        name = labels_to_names.get(label, "")
+        try:
+            mesh = trimesh.load(obj, force="mesh")
+        except Exception as exc:
+            add_warning(report, f"failed topology load for {rel(obj, result_dir)}: {exc}")
+            continue
+        if mesh.vertices.size == 0 or mesh.faces.size == 0:
+            continue
+        if projected_holes_available:
+            try:
+                hole_counts = {
+                    "xy": mesh_projected_holes(mesh, (0, 1)),
+                    "xz": mesh_projected_holes(mesh, (0, 2)),
+                    "yz": mesh_projected_holes(mesh, (1, 2)),
+                }
+            except ImportError as exc:
+                add_warning(report, f"projected-hole topology checks skipped; missing dependency: {exc}")
+                projected_holes_available = False
+                hole_counts = {"xy": None, "xz": None, "yz": None}
+        else:
+            hole_counts = {"xy": None, "xz": None, "yz": None}
+        valid_hole_counts = [value for value in hole_counts.values() if value is not None]
+        max_holes = max(valid_hole_counts) if valid_hole_counts else None
+        extents = np.asarray(mesh.extents).astype(float).tolist() if hasattr(mesh, "extents") else None
+        item = {
+            "label": label,
+            "name": name,
+            "file": rel(obj, result_dir),
+            "projected_holes": hole_counts,
+            "max_projected_holes": max_holes,
+            "euler_number": int(mesh.euler_number) if getattr(mesh, "euler_number", None) is not None else None,
+            "extents": extents,
+        }
+        report["part_topology"].append(item)
+
+        lowered = name.lower()
+        if any(keyword in lowered for keyword in HANDLE_KEYWORDS) and max_holes == 0:
+            add_warning(report, f"handle-like part {label} ({name}) has no projected holes; possible filled loop")
+
+        if name:
+            repeated.setdefault(name.lower(), []).append(item)
+
+    for normalized_name, items in repeated.items():
+        if len(items) < 2:
+            continue
+        hole_values = [item.get("max_projected_holes") for item in items if item.get("max_projected_holes") is not None]
+        if len(hole_values) == len(items) and max(hole_values) - min(hole_values) >= 1:
+            labels = [item["label"] for item in items]
+            add_warning(report, f"repeated part '{normalized_name}' has inconsistent projected hole counts {hole_values} for labels {labels}")
+
+        mesh_stats = {item["label"]: None for item in items}
+        for obj_stat in report.get("obj_parts", []):
+            label = Path(obj_stat["file"]).parts[1] if len(Path(obj_stat["file"]).parts) > 1 else None
+            if label in mesh_stats:
+                mesh_stats[label] = obj_stat
+        face_counts = [stat["faces"] for stat in mesh_stats.values() if stat]
+        if len(face_counts) >= 2 and min(face_counts) > 0 and max(face_counts) / min(face_counts) >= REPEATED_PART_RATIO_WARN:
+            add_warning(report, f"repeated part '{normalized_name}' has large face-count ratio: {face_counts}")
+
+
 def check_glb(result_dir: Path, report: dict[str, Any]) -> None:
     path = result_dir / "sample.glb"
     if not path.exists():
@@ -239,6 +359,12 @@ def write_markdown(report: dict[str, Any], path: Path) -> None:
     lines += ["", "## Object parts", ""]
     for item in report.get("obj_parts", []):
         lines.append(f"- `{item['file']}`: V={item['vertices']} F={item['faces']} bytes={item['bytes']}")
+    lines += ["", "## Part topology", ""]
+    for item in report.get("part_topology", []):
+        lines.append(
+            f"- label `{item['label']}` {item.get('name') or ''}: "
+            f"holes={item.get('projected_holes')} euler={item.get('euler_number')}"
+        )
     path.write_text("\n".join(lines) + "\n")
 
 
@@ -253,14 +379,16 @@ def inspect(result_dir: Path) -> dict[str, Any]:
         "voxel_parts": [],
         "allind": {},
         "obj_parts": [],
+        "part_topology": [],
         "glb": {},
         "mujoco": {},
     }
     check_required_files(result_dir, report)
-    check_basic_info(result_dir, report)
+    basic_info = check_basic_info(result_dir, report)
     check_coord_text(result_dir, report)
     check_voxel_arrays(result_dir, report)
     check_obj_parts(result_dir, report)
+    check_part_topology(result_dir, report, basic_info)
     check_glb(result_dir, report)
     check_mujoco(result_dir, report)
     report["status"] = "FAIL" if report["errors"] else "PASS_WITH_WARNINGS" if report["warnings"] else "PASS"
