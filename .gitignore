@@ -4,3 +4,5 @@ test_demo/
 __pycache__/
 *.py[cod]
 *.log
+
+pipeline_runs/

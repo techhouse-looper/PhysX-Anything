@@ -226,8 +226,9 @@ def get_logger(filename, verbosity=1, name=None):
 parser = argparse.ArgumentParser()
 parser.add_argument("--index", type=int, default=0)
 parser.add_argument("--range", type=int, default=2000)
+parser.add_argument("--basepath", type=str, default="./test_demo")
 args = parser.parse_args()
-basepath='./test_demo'
+basepath=args.basepath
 namelist=os.listdir(basepath)
 logger = get_logger(os.path.join('exp_split'+str(args.index)+'.log'),verbosity=1)
 logger.info('start')
