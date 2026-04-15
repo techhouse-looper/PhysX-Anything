@@ -45,6 +45,8 @@ def main() -> None:
 
     run_name = run_key(image_path)
     run_dir = RUN_ROOT / run_name
+    if run_dir.exists():
+        shutil.rmtree(run_dir)
     demo_dir = run_dir / "demo"
     output_dir = run_dir / "test_demo"
     demo_dir.mkdir(parents=True, exist_ok=True)
@@ -108,9 +110,16 @@ def main() -> None:
     result_dir = output_dir / run_name
     print("\n=== complete ===")
     print(f"Result directory: {result_dir}")
-    for path in ["basic_info.txt", "sample.glb", "basic_info.json", "basic.urdf", "basic.xml"]:
+    required = ["basic_info.txt", "sample.glb", "basic_info.json", "basic.urdf", "basic.xml"]
+    missing = []
+    for path in required:
         candidate = result_dir / path
-        print(f"{path}: {'OK' if candidate.exists() else 'missing'}")
+        exists = candidate.exists()
+        print(f"{path}: {'OK' if exists else 'missing'}")
+        if not exists:
+            missing.append(path)
+    if missing:
+        raise RuntimeError(f"pipeline completed without required artifacts: {missing}")
 
 
 if __name__ == "__main__":
